@@ -92,6 +92,7 @@ legend { font: 600 .875rem var(--font-title); color: var(--muted); padding: 0 va
 .input[aria-invalid="true"] { border: 2px solid var(--danger); }
 .err { color: var(--danger); font-size: .875rem; font-weight: 600; }
 .progreso { display: grid; gap: var(--s2); }
+.tramo { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s3); }
 progress { width: 100%; height: .75rem; appearance: none; border: 1px solid var(--line); background: var(--panel); }
 progress::-webkit-progress-bar { background: var(--panel); }
 progress::-webkit-progress-value { background: var(--amber); }
@@ -218,6 +219,15 @@ tr.marcada td.nota { color: var(--amber); font-weight: 600; }
           <span class="muted small" id="intervaloAyuda">Entre 150 y 5000. Más lento da más tiempo para ver el giro.</span>
           <p class="err" id="intervaloErr" hidden></p>
         </div>
+        <fieldset>
+          <legend>Tramo del barrido (<span id="tramoTot"></span> órdenes en total)</legend>
+          <div class="tramo">
+            <div class="field"><label class="label" for="desde">Desde N.º</label><input class="input" id="desde" type="number" inputmode="numeric" min="1" step="1" aria-describedby="tramoAyuda tramoErr"></div>
+            <div class="field"><label class="label" for="hasta">Hasta N.º</label><input class="input" id="hasta" type="number" inputmode="numeric" min="1" step="1" aria-describedby="tramoAyuda tramoErr"></div>
+          </div>
+          <span class="muted small" id="tramoAyuda">Son los mismos N.º del registro de un barrido completo con las 3 fases.</span>
+          <p class="err" id="tramoErr" hidden></p>
+        </fieldset>
         <div class="progreso">
           <progress id="prog" max="1" value="0" aria-labelledby="progTxt"></progress>
           <p class="small" id="progTxt" aria-live="polite">Listo para empezar.</p>
@@ -301,12 +311,15 @@ let gCorriendo = false, gTimer = null, gProx = 0, gTick = null;
 let corriendo = false, conectado = false, dev = null, chW = null, chN = null, ultimo = null;
 document.querySelectorAll('input[name=fase]').forEach(i => i.checked = pos.fases.includes(+i.value));
 
+const ini = () => Math.max(0, Math.min((pos.desde || 1) - 1, orden.length));
+const lim = () => Math.min(pos.hasta || orden.length, orden.length);
 const setEstado = (s, txt) => { $('#estado').dataset.s = s; $('#estadoTxt').textContent = txt; };
 function refrescarBotones() {
-  $('#iniciar').disabled = !conectado || orden.length === 0 || pos.i >= orden.length;
-  $('#iniciar').textContent = corriendo ? 'Pausar' : (pos.i > 0 && pos.i < orden.length ? 'Reanudar barrido' : 'Iniciar barrido');
+  $('#iniciar').disabled = !conectado || orden.length === 0;
+  $('#iniciar').textContent = corriendo ? 'Pausar' : (pos.i > ini() && pos.i < lim() ? 'Reanudar barrido' : 'Iniciar barrido');
   $('#semovio').disabled = !conectado || !log.length;
-  $('#reiniciar').disabled = corriendo || pos.i === 0;
+  $('#reiniciar').disabled = corriendo || pos.i === ini();
+  $('#desde').disabled = corriendo; $('#hasta').disabled = corriendo;
   $('#enviar').disabled = !conectado;
   $('#conectar').hidden = conectado; $('#desconectar').hidden = !conectado;
   $('#copiar').disabled = !log.length; $('#limpiar').disabled = !log.length || corriendo;
@@ -316,12 +329,14 @@ function refrescarBotones() {
   if (gCorriendo) { $('#iniciar').disabled = true; $('#enviar').disabled = true; }
 }
 function progreso() {
-  const tot = orden.length, i = Math.min(pos.i, tot);
-  $('#prog').max = Math.max(tot, 1); $('#prog').value = i;
-  if (!tot) { $('#progTxt').textContent = 'Elige al menos una fase.'; return; }
-  if (i >= tot) { $('#progTxt').textContent = `Barrido completo: ${tot} de ${tot} órdenes.`; return; }
-  const sig = orden[i];
-  $('#progTxt').textContent = i === 0 ? `${tot} órdenes por enviar.` : `${i} de ${tot} enviadas · sigue fase ${sig.fase}, orden ${hex2(sig.cc)}`;
+  const tot = orden.length;
+  if (!tot) { $('#progTxt').textContent = 'Elige al menos una fase.'; $('#prog').value = 0; return; }
+  const a = ini(), b = lim(), n = b - a, hechas = Math.max(0, Math.min(pos.i, b) - a), tramo = a > 0 || b < tot;
+  $('#prog').max = Math.max(n, 1); $('#prog').value = hechas;
+  const rango = tramo ? ` del tramo ${a + 1}–${b}` : '';
+  if (pos.i >= b) { $('#progTxt').textContent = `${tramo ? 'Tramo' : 'Barrido'} completo: ${n} de ${n} órdenes${rango}.`; return; }
+  const sig = orden[Math.max(pos.i, a)];
+  $('#progTxt').textContent = hechas === 0 ? `${n} órdenes por enviar${rango} (de ${tot} en total).` : `${hechas} de ${n} enviadas${rango} · sigue N.º ${pos.i + 1}: fase ${sig.fase}, orden ${hex2(sig.cc)}`;
 }
 
 /* ---------- Trama ---------- */
@@ -404,24 +419,38 @@ function intervalo() {
 }
 $('#intervalo').addEventListener('input', () => { if ($('#intervalo').getAttribute('aria-invalid') === 'true') intervalo(); });
 async function correr() {
-  while (corriendo && conectado && pos.i < orden.length) {
+  while (corriendo && conectado && pos.i < lim()) {
     const ms = intervalo(); if (ms === null) { corriendo = false; break; }
     const o = orden[pos.i];
     try { await escribir(o.b, { fase: o.fase }); } catch { corriendo = false; toast('Falló el envío; barrido en pausa'); break; }
     pos.i++; guardar(); progreso();
     await sleep(ms);
   }
-  if (pos.i >= orden.length && corriendo) toast('Barrido completo');
+  if (pos.i >= lim() && corriendo) toast(ini() > 0 || lim() < orden.length ? 'Tramo completo' : 'Barrido completo');
   corriendo = false; refrescarBotones(); progreso();
 }
 $('#iniciar').onclick = () => {
   if (corriendo) { corriendo = false; refrescarBotones(); toast('Barrido en pausa'); return; }
   if (intervalo() === null) { $('#intervalo').focus(); return; }
+  if (!tramoOk()) { (document.querySelector('#desde[aria-invalid=true]') || $('#hasta')).focus(); return; }
+  if (pos.i < ini() || pos.i >= lim()) pos.i = ini();
   corriendo = true; $('#candidatas').hidden = true; refrescarBotones(); correr();
 };
-$('#reiniciar').onclick = () => { pos.i = 0; guardar(); progreso(); refrescarBotones(); toast('El barrido parte de nuevo desde el comienzo'); };
+$('#reiniciar').onclick = () => { pos.i = ini(); guardar(); progreso(); refrescarBotones(); toast(`El barrido parte de nuevo desde el N.º ${ini() + 1}`); };
+function tramoOk() {
+  const tot = orden.length, d = +$('#desde').value, h = +$('#hasta').value;
+  const ed = !(Number.isInteger(d) && d >= 1 && d <= tot) ? `Error: «Desde» debe ser un número entre 1 y ${tot}` : '';
+  const eh = ed ? '' : !(Number.isInteger(h) && h >= 1 && h <= tot) ? `Error: «Hasta» debe ser un número entre 1 y ${tot}` : h < d ? 'Error: «Hasta» no puede ser menor que «Desde»' : '';
+  $('#desde').setAttribute('aria-invalid', !!ed); $('#hasta').setAttribute('aria-invalid', !!eh);
+  $('#tramoErr').hidden = !(ed || eh); $('#tramoErr').textContent = ed || eh;
+  if (ed || eh) return false;
+  if (d !== pos.desde || h !== pos.hasta) { pos.desde = d; pos.hasta = h; pos.i = d - 1; guardar(); }
+  progreso(); refrescarBotones(); return true;
+}
+function pintarTramo() { $('#desde').max = $('#hasta').max = orden.length; $('#desde').value = ini() + 1; $('#hasta').value = lim(); $('#tramoTot').textContent = orden.length; }
+['#desde', '#hasta'].forEach(s => $(s).addEventListener('change', tramoOk));
 document.querySelectorAll('input[name=fase]').forEach(i => i.addEventListener('change', () => {
-  pos = { fases: fasesSel(), i: 0 }; orden = lista(pos.fases); guardar(); progreso(); refrescarBotones();
+  pos = { fases: fasesSel(), i: 0 }; orden = lista(pos.fases); pintarTramo(); guardar(); progreso(); refrescarBotones();
 }));
 
 /* ---------- Se movió ---------- */
@@ -557,7 +586,7 @@ $('#obsGira').onclick = () => observar('Giró', true);
 /* ---------- Inicio ---------- */
 if (!navigator.bluetooth) { $('#sinBT').hidden = false; $('#conectar').disabled = true; setEstado('err', 'Sin Bluetooth web'); }
 if (log.length) { const e = log.at(-1); dibujarTrama(e.env, e.res); }
-progreso(); render();
+pintarTramo(); progreso(); render();
 </script>
 </body>
 </html>
