@@ -109,6 +109,18 @@ progress::-moz-progress-bar { background: var(--amber); }
 .manual { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--s3); align-items: end; }
 @media (max-width: 30rem) { .manual { grid-template-columns: minmax(0, 1fr); } }
 
+/* Prueba guiada */
+.guiada { display: grid; gap: var(--s4); }
+textarea.input { min-height: 15rem; padding: var(--s3); line-height: 1.6; resize: vertical; font-variant-numeric: tabular-nums; }
+.paso { border: 1px solid var(--line); background: var(--panel); padding: var(--s3) var(--s4); display: grid; gap: var(--s1); }
+.paso code { color: var(--amber); font-weight: 600; font-size: 1.125rem; }
+.obs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s3); }
+@media (max-width: 34rem) { .obs { grid-template-columns: minmax(0, 1fr); } }
+.obs .btn { width: 100%; }
+.err-resumen { border: 2px solid var(--danger-line); background: var(--danger-bg); padding: var(--s3) var(--s4); color: var(--danger); }
+.err-resumen h3 { font: 600 1rem var(--font-title); margin-bottom: var(--s1); }
+.err-resumen ul { padding-left: 1.2em; }
+
 /* Registro */
 .reg-head { display: flex; flex-wrap: wrap; gap: var(--s3); justify-content: space-between; align-items: baseline; margin-bottom: var(--s3); }
 .reg-head h2 { margin: 0; }
@@ -151,6 +163,40 @@ tr.marcada td.nota { color: var(--amber); font-weight: 600; }
     <h2 id="tTrama">Última trama</h2>
     <div class="trama" id="trama" tabindex="0" role="img" aria-label="Aún no se ha enviado ninguna trama" hidden></div>
     <p class="nota muted small" id="tramaNota">Cuando envíes una orden, aquí aparece byte a byte junto a la respuesta del soporte. Lo que cambia en la respuesta queda resaltado.</p>
+  </section>
+
+  <section class="guiada" aria-labelledby="tGuiada">
+    <div>
+      <h2 id="tGuiada">Prueba guiada</h2>
+      <p>Manda la lista de abajo, una orden cada cierto tiempo. Cuando escuches o veas algo, toca el botón que corresponde: queda anotado en la orden recién enviada. «Empezó a zumbar» y «Giró» pausan la prueba.</p>
+    </div>
+    <div class="err-resumen" id="listaErr" tabindex="-1" hidden aria-labelledby="listaErrT"><h3 id="listaErrT">Hay líneas que no se pueden enviar</h3><ul id="listaErrL"></ul></div>
+    <div class="cfg">
+      <div class="field">
+        <label class="label" for="lista">Órdenes, una por línea</label>
+        <span class="muted small" id="listaAyuda">Bytes en hexadecimal. Lo que va después de # es un comentario y no se envía.</span>
+        <textarea class="input" id="lista" wrap="off" spellcheck="false" autocapitalize="characters" aria-describedby="listaAyuda"></textarea>
+        <p><button class="btn" id="listaReset" type="button">Restaurar la lista sugerida</button></p>
+      </div>
+      <div class="campos">
+        <div class="field">
+          <label class="label" for="cada">Segundos entre órdenes</label>
+          <input class="input" id="cada" type="number" inputmode="numeric" min="1" max="60" step="1" value="5" aria-describedby="cadaAyuda cadaErr">
+          <span class="muted small" id="cadaAyuda">Entre 1 y 60.</span>
+          <p class="err" id="cadaErr" hidden></p>
+        </div>
+        <div class="paso" aria-live="polite">
+          <span class="small muted" id="pasoInfo">Prueba sin empezar.</span>
+          <code id="pasoBytes">—</code>
+        </div>
+        <button class="btn btn-prim btn-big" id="guiadaBtn" type="button" disabled>Iniciar prueba</button>
+      </div>
+    </div>
+    <div class="obs" role="group" aria-label="Lo que observas en el soporte">
+      <button class="btn" id="obsZumba" type="button" disabled>Empezó a zumbar</button>
+      <button class="btn" id="obsPara" type="button" disabled>Dejó de zumbar</button>
+      <button class="btn" id="obsGira" type="button" disabled>Giró</button>
+    </div>
   </section>
 
   <section class="barrido" aria-labelledby="tBarrido">
@@ -251,6 +297,7 @@ function lista(fases) {
 let log = store.get('soporte.log', []);           // {n, t, env:[..], res:[..]|null, nota}
 let pos = store.get('soporte.pos', { fases: [1, 2, 3], i: 0 });
 let orden = lista(pos.fases);
+let gCorriendo = false, gTimer = null, gProx = 0, gTick = null;
 let corriendo = false, conectado = false, dev = null, chW = null, chN = null, ultimo = null;
 document.querySelectorAll('input[name=fase]').forEach(i => i.checked = pos.fases.includes(+i.value));
 
@@ -265,6 +312,8 @@ function refrescarBotones() {
   $('#copiar').disabled = !log.length; $('#limpiar').disabled = !log.length || corriendo;
   document.querySelectorAll('input[name=fase]').forEach(i => i.disabled = corriendo);
   document.querySelectorAll('.cand-rep').forEach(b => b.disabled = !conectado || corriendo);
+  if (typeof pintarPaso === 'function') pintarPaso();
+  if (gCorriendo) { $('#iniciar').disabled = true; $('#enviar').disabled = true; }
 }
 function progreso() {
   const tot = orden.length, i = Math.min(pos.i, tot);
@@ -338,8 +387,8 @@ async function abrir() {
   conectado = true; setEstado('ok', 'Conectado a ' + (dev.name || 'soporte')); refrescarBotones(); toast('Soporte conectado');
 }
 function alDesconectar() {
-  const estaba = corriendo; corriendo = false; conectado = false; refrescarBotones(); progreso();
-  setEstado('err', 'Se perdió la conexión' + (estaba ? ' · barrido en pausa' : ''));
+  const estaba = corriendo || gCorriendo; if (gCorriendo) { gCorriendo = false; clearTimeout(gTimer); clearInterval(gTick); } corriendo = false; conectado = false; refrescarBotones(); progreso();
+  setEstado('err', 'Se perdió la conexión' + (estaba ? ' · envío en pausa' : ''));
   $('#conectar').textContent = 'Reconectar';
 }
 $('#conectar').onclick = () => (dev && !dev.gatt.connected) ? abrir().catch(e => setEstado('err', 'No se pudo reconectar: ' + e.message)) : conectar();
@@ -425,6 +474,85 @@ function confirmarBorrado() {   // dos toques en vez de confirm(): no bloquea la
   armado = true; $('#limpiar').textContent = 'Toca otra vez para borrar';
   setTimeout(() => { armado = false; $('#limpiar').textContent = 'Borrar registro'; }, 4000); return false;
 }
+
+/* ---------- Prueba guiada ---------- */
+const LISTA_SUGERIDA = `55 01 D1 AA      # única respuesta distinta del barrido (A5)
+55 02 C8 FF AA   # cerca del inicio del zumbido (fila ~860)
+55 02 C9 00 AA
+55 02 C9 02 AA
+55 02 C9 FF AA
+55 02 C8 02 AA
+55 02 C8 00 AA
+55 02 CA 00 AA
+55 03 A1 00 01 AA   # cerca de donde paró el zumbido (fila ~1349)
+55 03 A2 01 00 AA
+55 03 A2 00 01 AA`;
+let guiada = store.get('soporte.guiada', { texto: LISTA_SUGERIDA, i: 0 });
+$('#lista').value = guiada.texto;
+function leerLista() {
+  const pasos = [], errs = [];
+  $('#lista').value.split('\n').forEach((linea, k) => {
+    const [cod, ...com] = linea.split('#'); if (!cod.trim()) return;
+    const r = parseHex(cod);
+    if (r.err) errs.push(`Línea ${k + 1}: ${r.err}`); else pasos.push({ b: r.b, com: com.join('#').trim() });
+  });
+  return { pasos, errs };
+}
+function cadaSeg() {
+  const v = +$('#cada').value, ok = Number.isInteger(v) && v >= 1 && v <= 60;
+  $('#cada').setAttribute('aria-invalid', !ok); $('#cadaErr').hidden = ok;
+  $('#cadaErr').textContent = ok ? '' : 'Error: escribe un número entero entre 1 y 60';
+  return ok ? v : null;
+}
+$('#cada').addEventListener('input', () => { if ($('#cada').getAttribute('aria-invalid') === 'true') cadaSeg(); });
+function pintarPaso() {
+  const { pasos } = leerLista(), tot = pasos.length, i = guiada.i;
+  $('#guiadaBtn').textContent = gCorriendo ? 'Pausar prueba' : (i > 0 && i < tot ? 'Reanudar prueba' : 'Iniciar prueba');
+  $('#guiadaBtn').disabled = !conectado || (!gCorriendo && corriendo);
+  ['#obsZumba', '#obsPara', '#obsGira'].forEach(s => $(s).disabled = !log.length);
+  $('#lista').readOnly = gCorriendo; $('#listaReset').disabled = gCorriendo;
+  if (!tot) { $('#pasoInfo').textContent = 'La lista está vacía.'; $('#pasoBytes').textContent = '—'; return; }
+  if (i >= tot && !gCorriendo) { $('#pasoInfo').textContent = `Prueba completa: ${tot} de ${tot} órdenes enviadas.`; $('#pasoBytes').textContent = '—'; return; }
+  const sig = pasos[Math.min(i, tot - 1)];
+  const seg = gCorriendo ? Math.max(0, Math.ceil((gProx - Date.now()) / 1000)) : null;
+  $('#pasoInfo').textContent = gCorriendo ? `Enviadas ${i} de ${tot} · la siguiente en ${seg} s` : (i === 0 ? `${tot} órdenes en la lista. La primera será:` : `En pausa · enviadas ${i} de ${tot}. Sigue:`);
+  $('#pasoBytes').textContent = fmtBytes(sig.b) + (sig.com ? '  · ' + sig.com : '');
+}
+function pararGuiada() { gCorriendo = false; clearTimeout(gTimer); clearInterval(gTick); pintarPaso(); refrescarBotones(); }
+async function pasoGuiada() {
+  if (!gCorriendo || !conectado) { pararGuiada(); return; }
+  const { pasos } = leerLista();
+  if (guiada.i >= pasos.length) { pararGuiada(); toast('Prueba completa'); pintarPaso(); return; }
+  const p = pasos[guiada.i];
+  try { await escribir(p.b, { nota: p.com ? 'Prueba: ' + p.com : 'Prueba guiada' }); } catch { pararGuiada(); toast('Falló el envío; prueba en pausa'); return; }
+  guiada.i++; store.set('soporte.guiada', guiada);
+  if (guiada.i >= pasos.length) { gProx = Date.now(); pararGuiada(); toast('Prueba completa'); return; }
+  gProx = Date.now() + cadaSeg() * 1000; pintarPaso();
+  gTimer = setTimeout(pasoGuiada, cadaSeg() * 1000);
+}
+$('#guiadaBtn').onclick = () => {
+  if (gCorriendo) { pararGuiada(); toast('Prueba en pausa'); return; }
+  const { pasos, errs } = leerLista();
+  $('#listaErrL').innerHTML = errs.map(e => `<li>${esc(e)}</li>`).join(''); $('#listaErr').hidden = !errs.length;
+  if (errs.length) { $('#listaErr').focus(); return; }
+  if (!pasos.length) { toast('La lista está vacía'); return; }
+  if (cadaSeg() === null) { $('#cada').focus(); return; }
+  if (guiada.i >= pasos.length) guiada.i = 0;
+  guiada.texto = $('#lista').value; store.set('soporte.guiada', guiada);
+  corriendo = false; gCorriendo = true; refrescarBotones();
+  gTick = setInterval(pintarPaso, 250); pasoGuiada();
+};
+$('#lista').addEventListener('input', () => { guiada = { texto: $('#lista').value, i: 0 }; store.set('soporte.guiada', guiada); $('#listaErr').hidden = true; pintarPaso(); });
+$('#listaReset').onclick = () => { $('#lista').value = LISTA_SUGERIDA; guiada = { texto: LISTA_SUGERIDA, i: 0 }; store.set('soporte.guiada', guiada); pintarPaso(); toast('Lista sugerida restaurada'); };
+function observar(txt, pausa) {
+  const e = log.at(-1); if (!e) return;
+  e.nota = e.nota ? e.nota + ' · ' + txt : txt; guardar(); render();
+  if (pausa) { if (gCorriendo) pararGuiada(); corriendo = false; refrescarBotones(); }
+  toast(`Anotado en la orden ${fmtBytes(e.env)}: ${txt.toLowerCase()}` + (pausa ? '. Prueba en pausa.' : ''));
+}
+$('#obsZumba').onclick = () => observar('Empezó a zumbar', true);
+$('#obsPara').onclick = () => observar('Dejó de zumbar', false);
+$('#obsGira').onclick = () => observar('Giró', true);
 
 /* ---------- Inicio ---------- */
 if (!navigator.bluetooth) { $('#sinBT').hidden = false; $('#conectar').disabled = true; setEstado('err', 'Sin Bluetooth web'); }
